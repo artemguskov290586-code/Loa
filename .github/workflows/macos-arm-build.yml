@@ -1,0 +1,107 @@
+name: macOS arm64
+
+# No push trigger: pull requests are checked here, builds can be run by hand, and the
+# daily playerbot-beta pre-release (beta-prerelease.yml) calls this workflow.
+on:
+  pull_request:
+    paths-ignore:
+      - 'sql/**' 
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - ready_for_review
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Commit to build"
+        type: string
+        required: true
+      package:
+        description: "Upload the binaries-only zip (artifact ci-package-macos-arm64)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    if: ${{ !github.event.pull_request.draft }}
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ inputs.ref }}
+        persist-credentials: false
+
+    - name: Set reusable strings
+      id: strings
+      shell: bash
+      run: |
+        echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
+
+    - name: Install/Update requirements
+      env:
+        HOMEBREW_NO_INSTALLED_DEPENDENTS_CHECK: 1
+      run: |
+        brew update
+        brew uninstall openssl@1.1
+        for pkg in mysql openssl readline cmake boost coreutils ninja; do
+          brew ls --versions $pkg || brew install $pkg
+        done
+        brew config
+
+    - name: Check some deps
+      run: |
+        mysql --version
+        openssl version
+        
+    - name: Print CPU info
+      run: |
+         echo "Cores: $(nproc), Arch: $(uname -p)"
+        
+    - name: Configure CMake
+      run: >
+        cmake -GNinja -B ${{ steps.strings.outputs.build-output-dir }} 
+        -DWITH_WARNINGS=1 -DWITH_COREDEBUG=0 -DELUNA=0 -DCMAKE_INSTALL_PREFIX=check_install
+        -S ${{ github.workspace }}       
+
+    - name: Build
+      run: |
+        cd ${{ steps.strings.outputs.build-output-dir }}
+        ninja
+        ninja install
+      
+    # - name: Unit tests
+    #   run: |
+    #     cd ${{ steps.strings.outputs.build-output-dir }}
+    #     ninja test
+      
+    - name: Check binaries
+      run: |
+        cd ${{ github.workspace }}/check_install/bin
+        ./authserver --version
+        ./worldserver --version
+    # Binaries-only zip for the daily playerbot-beta pre-release (beta-prerelease.yml).
+    # Zipped here so the executables keep their permissions.
+    - name: Package (CI)
+      if: ${{ inputs.package }}
+      run: |
+        mkdir -p ci-package/etc
+        cp -a check_install/bin ci-package/bin
+        cp src/server/authserver/authserver.conf.dist src/server/worldserver/worldserver.conf.dist \
+          modules/mod_playerbots/config/playerbots.conf.dist ci-package/etc/
+        ls -la ci-package/bin ci-package/etc
+        (cd ci-package && zip -r -q ../ci-macos-arm64.zip .)
+
+    - name: Upload CI package
+      if: ${{ inputs.package }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: ci-package-macos-arm64
+        path: ci-macos-arm64.zip
+        retention-days: 7
+        compression-level: 0
